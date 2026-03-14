@@ -1,6 +1,6 @@
 # Tedd.AutoSqlOptimizer
 
-Works with MSSQL 2025.
+Works with MSSQL 2025 (and probably earlier versions).
 
 **AI-driven automatic hypothesis generation and testing for SQL Server query optimization.**
 
@@ -48,7 +48,7 @@ Example: Recently I got help from AI to change a column. To do this it decided t
 So, whatever database you give it access to - just assume it will mess it up.
 I'm not to be held liable for any damages caused by this source code.
 
-### Key Safety Guarantees attempts
+### Key Safety Guarantee attempts
 
 - **Checksums before and after** — row count + `CHECKSUM_AGG(BINARY_CHECKSUM(*))` on all touched base tables. If any checksum differs, the attempt is flagged as a data integrity failure.
 - **Always reverts** — every hypothesis is rolled back after measurement. The database is left in its original state.
