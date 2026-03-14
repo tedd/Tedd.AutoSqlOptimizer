@@ -3,6 +3,12 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# Local configuration with secrets (connection strings, API keys)
+appsettings.Development.json
+
+# Benchmark run output (may contain query results, timing data)
+**/Runs/
+
 # User-specific files
 *.rsuser
 *.suo
@@ -416,3 +422,4 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+/src/Tedd.AutoSqlOptimizer/Optimizations
