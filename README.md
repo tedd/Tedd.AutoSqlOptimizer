@@ -37,7 +37,18 @@ Slow SQL command
     best strategy, % improvement, all timings, integrity status
 ```
 
-### Key Safety Guarantees
+### Disclaimer and Warning
+
+The operations, including checksum and reverting changes, is done by AI. AI is well known to fail or to weird things like deleting all data permanently.
+
+<u>It is important that you understand this risk.</u>
+
+Example: Recently I got help from AI to change a column. To do this it decided to create new table, copy over data, delete old table and rename new table in place. It did all of that perfectly, except the copy-data step failed. Table was lost, data gone.
+
+So, whatever database you give it access to - just assume it will mess it up.
+I'm not to be held liable for any damages caused by this source code.
+
+### Key Safety Guarantees attempts
 
 - **Checksums before and after** — row count + `CHECKSUM_AGG(BINARY_CHECKSUM(*))` on all touched base tables. If any checksum differs, the attempt is flagged as a data integrity failure.
 - **Always reverts** — every hypothesis is rolled back after measurement. The database is left in its original state.
@@ -92,6 +103,8 @@ export OPENAI_API_KEY=sk-...
 Or place the key in `~/.openaikey` (plain text, no newline needed).
 
 ### 3. Add Init.sql (optional)
+
+To give it a fair start, and not to mess with anything it shouldn't, I use a development server (Linux, Docker) and limit its CPU's to same as our Azure instance. I also restore the DB from scratch before every run.
 
 ```sql
 USE master;
