@@ -1,6 +1,7 @@
 using Microsoft.Data.SqlClient;
 
 using System.Text;
+using System.Text.RegularExpressions;
 
 using Tedd.AutoSqlOptimizer.Models;
 
@@ -41,6 +42,22 @@ public class BenchmarkRunner
             folders = folders
                 .Where(f => Path.GetFileName(f).Contains(specificFolder, StringComparison.OrdinalIgnoreCase))
                 .ToList();
+        }
+
+        if (_config.IncludePatterns.Count > 0)
+        {
+            folders = folders
+                .Where(f => _config.IncludePatterns.Any(p => Regex.IsMatch(Path.GetFileName(f), p, RegexOptions.IgnoreCase)))
+                .ToList();
+            _log($"Include patterns applied ({string.Join(", ", _config.IncludePatterns)}): {folders.Count} folder(s) remaining.");
+        }
+
+        if (_config.ExcludePatterns.Count > 0)
+        {
+            folders = folders
+                .Where(f => !_config.ExcludePatterns.Any(p => Regex.IsMatch(Path.GetFileName(f), p, RegexOptions.IgnoreCase)))
+                .ToList();
+            _log($"Exclude patterns applied ({string.Join(", ", _config.ExcludePatterns)}): {folders.Count} folder(s) remaining.");
         }
 
         if (folders.Count == 0)

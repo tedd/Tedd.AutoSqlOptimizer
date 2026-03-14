@@ -12,6 +12,8 @@ public class BenchmarkConfig
     public string OptimizationsPath { get; set; } = "Optimize";
     public string OutputPath { get; set; } = "Runs";
     public string? IntegrityCheckSkipPattern { get; set; }
+    public List<string> IncludePatterns { get; set; } = [];
+    public List<string> ExcludePatterns { get; set; } = [];
 }
 
 public class OpenAiConfig

@@ -6,6 +6,10 @@ Works with MSSQL 2025 (and probably earlier versions).
 
 Point it at a slow SQL Server command. The tool uses AI to inspect the underlying stored procedures and views, form optimization hypotheses, apply each one, benchmark it, verify result integrity via checksums, revert the change, and report which hypothesis won — all fully automated, zero manual intervention.
 
+![image-20260314190414818](images/README/image-20260314190414818.png)
+
+![image-20260314190353219](images/README/image-20260314190353219.png)
+
 ---
 
 ## How It Works
@@ -199,6 +203,8 @@ All settings live in `appsettings.json` (defaults) and can be overridden in `app
 | `OptimizationsPath` | `Optimizations` | Folder containing optimization targets |
 | `OutputPath` | `Runs` | Folder where run results are written |
 | `IntegrityCheckSkipPattern` | `^SYS_MON\.` | Regex — skip checksum for tables matching this pattern |
+| `IncludePatterns` | `[]` | List of regexes — only run folders whose name matches at least one pattern (empty = run all) |
+| `ExcludePatterns` | `[]` | List of regexes — skip folders whose name matches any pattern (empty = skip none) |
 
 ---
 
