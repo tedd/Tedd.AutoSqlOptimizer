@@ -138,21 +138,38 @@ CHECKPOINT;
 
 ### 4. Add Optimization Targets
 
-Create a folder under `src/Tedd.AutoSqlOptimizer/Optimizations/` named with a numeric prefix and a description:
+Create a folder under `src/Tedd.AutoSqlOptimizer/Optimize/` named with a numeric prefix and a description:
 
 ```
-Optimizations/
-├── init.sql            <- the SQL initialization
+Optimize/
+├── init.sql            <- optional DB initialization / restore script
 └── 001_MySlowProcedure/
-    ├── 1_before.sql    <- the SQL to benchmark (required)
+    ├── AI_Input.txt    <- freetext description of the test (optional — see below)
+    ├── 1_before.sql    <- SQL to benchmark (required, OR generated from AI_Input.txt)
     ├── 2_optimize.sql  <- optimization SQL  (omit for AI mode)
-    ├── 3_after.sql     <- after SQL         (omit for AI mode)
+    ├── 3_after.sql     <- after SQL         (omit for AI mode; defaults to 1_before.sql if absent)
     └── 4_revert.sql    <- revert SQL        (omit for AI mode)
 ```
 
-**AI mode** (recommended): provide only `1_before.sql`. The tool discovers the schema and generates all optimization hypotheses automatically.
+#### `AI_Input.txt` — freetext test description
 
-**Manual mode**: provide all four files. The tool applies `2_optimize.sql`, benchmarks `3_after.sql`, then runs `4_revert.sql`.
+`AI_Input.txt` is an optional plain-text file that can be placed in any optimization folder. It serves two purposes:
+
+1. **Extra context for the AI optimizer.** When present it is injected into every schema-discovery and optimization prompt, giving the AI human-written domain knowledge (e.g. "this proc is called with millions of rows, PartyId is always filtered, the result is sorted by date").
+
+2. **Generates missing SQL files on the fly.** If any of the four SQL files are absent, the AI uses `AI_Input.txt` to generate them before the benchmark run starts:
+   - `1_before.sql` missing → AI generates the benchmark query from the description.
+   - `3_after.sql` missing → defaults to `1_before.sql` (same query, different schema state).
+
+The system works correctly with any combination of present/absent files as long as at least `1_before.sql` or `AI_Input.txt` is provided.
+
+---
+
+**AI mode** (recommended): provide only `1_before.sql` (and optionally `AI_Input.txt`). The tool discovers the schema and generates all optimization hypotheses automatically.
+
+**Description-only mode**: provide only `AI_Input.txt`. The AI generates `1_before.sql` from the description, then runs in AI mode.
+
+**Manual mode**: provide all four SQL files. The tool applies `2_optimize.sql`, benchmarks `3_after.sql`, then runs `4_revert.sql`. All files fully support multi-batch scripts using `GO` statement separators.
 
 #### Example `1_before.sql`
 
@@ -200,11 +217,13 @@ All settings live in `appsettings.json` (defaults) and can be overridden in `app
 | `AiOptimizationCount` | `10` | Number of hypotheses the AI generates per target |
 | `AiMaxRetries` | `4` | Max retries if the AI generates invalid SQL |
 | `TimingMetric` | `Lowest` | `Lowest` or `Average` — which timing value to use for comparison |
-| `OptimizationsPath` | `Optimizations` | Folder containing optimization targets |
+| `OptimizationsPath` | `Optimize` | Folder containing optimization targets |
 | `OutputPath` | `Runs` | Folder where run results are written |
 | `IntegrityCheckSkipPattern` | `^SYS_MON\.` | Regex — skip checksum for tables matching this pattern |
 | `IncludePatterns` | `[]` | List of regexes — only run folders whose name matches at least one pattern (empty = run all) |
 | `ExcludePatterns` | `[]` | List of regexes — skip folders whose name matches any pattern (empty = skip none) |
+| `RunInitBeforeEachTest` | `false` | Run `init.sql` before every optimization folder instead of once at startup |
+| `RunInitBeforeNextTestIfRevertFailed` | `false` | Run `init.sql` before the next test if the previous revert failed, to restore a clean DB state |
 
 ---
 
@@ -219,13 +238,16 @@ Runs/
     ├── summary.html               <- live-updating summary across all targets
     ├── summary.md
     └── 001_MySlowProcedure/
-        ├── 1_before.sql           <- captured before SQL
+        ├── AI_Input.txt           <- copied from source folder (if present)
+        ├── 1_before.sql           <- captured/generated before SQL
+        ├── 3_after.sql            <- captured after SQL (may equal 1_before.sql)
         ├── ai_opt_1/
         │   ├── description.txt    <- AI hypothesis description
         │   ├── ai_prompt.txt      <- the prompt sent to the AI
         │   ├── 2_optimize.sql     <- generated optimization SQL
         │   └── 4_revert.sql       <- generated revert SQL
         ├── ai_opt_2/ ...
+        ├── ai_opt_combined/       <- combined best-of-all attempt (AI mode)
         ├── results.md             <- per-target report (Markdown)
         └── results.html           <- per-target report (HTML, open in browser)
 ```
@@ -240,11 +262,11 @@ The HTML report shows:
 
 ## Optional: Database Init Script
 
-Place an `init.sql` in the `Optimizations/` folder. It runs once before any benchmarks — useful for restoring a snapshot or seeding test data:
+Place an `init.sql` in the `Optimize/` folder. It runs once before any benchmarks by default — useful for restoring a snapshot or seeding test data. Set `RunInitBeforeEachTest: true` to re-run it before every folder, or `RunInitBeforeNextTestIfRevertFailed: true` to re-run it only when a revert left the DB dirty:
 
 ```
-Optimizations/
-├── init.sql          <- optional, runs first
+Optimize/
+├── init.sql          <- optional, runs first (or per-test — see config)
 └── 001_MyTarget/
     └── 1_before.sql
 ```

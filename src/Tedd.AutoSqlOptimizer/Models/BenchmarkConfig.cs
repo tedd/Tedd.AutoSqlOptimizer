@@ -14,6 +14,17 @@ public class BenchmarkConfig
     public string? IntegrityCheckSkipPattern { get; set; }
     public List<string> IncludePatterns { get; set; } = [];
     public List<string> ExcludePatterns { get; set; } = [];
+    /// <summary>
+    /// When true, init.sql is executed once before each optimization folder (test type) instead of
+    /// only once at the start of the entire run. Has no effect if init.sql does not exist.
+    /// </summary>
+    public bool RunInitBeforeEachTest { get; set; } = false;
+    /// <summary>
+    /// When true, init.sql is executed before the next test if the previous test's revert failed
+    /// (or threw an exception after the optimization was applied), to restore a clean DB state.
+    /// Has no effect if init.sql does not exist.
+    /// </summary>
+    public bool RunInitBeforeNextTestIfRevertFailed { get; set; } = false;
 }
 
 public class OpenAiConfig

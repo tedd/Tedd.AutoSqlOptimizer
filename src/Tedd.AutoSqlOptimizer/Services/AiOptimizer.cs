@@ -66,7 +66,7 @@ public class AiOptimizer
 
         // Phase 1: Gather schema info + identify base tables
         _log("=== AI Optimization: Phase 1 — Schema Discovery (AI) ===");
-        var discovery = await GatherSchemaInfoWithAiAsync(conn, optimization.BeforeSql, apiKey);
+        var discovery = await GatherSchemaInfoWithAiAsync(conn, optimization.BeforeSql, optimization.AiInput, apiKey);
         var schemaInfo = discovery.SchemaInfo;
         var baseTables = discovery.BaseTables;
 
@@ -116,7 +116,7 @@ public class AiOptimizer
 
                 // Build prompt (includes SQL analysis and schema context)
                 var prompt = BuildPrompt(optimization.BeforeSql, schemaInfo, beforeResult,
-                    previousAttemptsSummary.ToString(), i, baseTables);
+                    previousAttemptsSummary.ToString(), i, baseTables, optimization.AiInput);
 
                 // Save prompt for debugging
                 File.WriteAllText(Path.Combine(aiFolder, "ai_prompt.txt"), prompt);
@@ -200,7 +200,7 @@ public class AiOptimizer
                 Directory.CreateDirectory(combinedFolder);
 
                 // Build prompt for combined optimization
-                var combinedPrompt = BuildCombinedPrompt(optimization.BeforeSql, schemaInfo, beforeResult, previousAttemptsSummary.ToString());
+                var combinedPrompt = BuildCombinedPrompt(optimization.BeforeSql, schemaInfo, beforeResult, previousAttemptsSummary.ToString(), optimization.AiInput);
 
                 // Save prompt for debugging
                 File.WriteAllText(Path.Combine(combinedFolder, "ai_prompt.txt"), combinedPrompt);
@@ -367,10 +367,6 @@ public class AiOptimizer
             if (revertSucceeded)
             {
                 _log("  Verifying revert by running before SQL...");
-                
-                // Update statistics after reverting, before verification
-                _sqlExecutor.UpdateStatistics(conn);
-                
                 try
                 {
                     _sqlExecutor.ClearCache(conn);
@@ -480,7 +476,57 @@ public class AiOptimizer
         notes.AppendLine();
     }
 
-    private async Task<SchemaDiscoveryResult> GatherSchemaInfoWithAiAsync(SqlConnection conn, string beforeSql, string apiKey)
+    /// <summary>
+    /// Uses AI to generate a missing SQL file (1_before or 3_after) based on AI_Input.txt description.
+    /// Returns null if generation fails or no API key is configured.
+    /// </summary>
+    public async Task<string?> GenerateMissingSqlAsync(string aiInput, string fileRole)
+    {
+        var apiKey = _config.OpenAI.ApiKey;
+        if (string.IsNullOrWhiteSpace(apiKey))
+            apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY") ?? "";
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            _log($"  ERROR: No OpenAI API key configured. Cannot generate missing {fileRole}.sql.");
+            return null;
+        }
+
+        var roleDescription = fileRole switch
+        {
+            "1_before" => "the T-SQL query to benchmark BEFORE any optimization is applied",
+            "3_after"  => "the T-SQL query to benchmark AFTER the optimization is applied (often the same as the before query)",
+            "2_optimize" => "the T-SQL script that applies the optimization to the database",
+            "4_revert"   => "the T-SQL script that reverts/undoes the optimization",
+            _ => fileRole
+        };
+
+        var prompt = $"""
+            You are a SQL Server expert. Based on the following description, generate {roleDescription}.
+
+            Description:
+            {aiInput}
+
+            Respond with ONLY the raw T-SQL script. No explanations, no markdown code fences, just the SQL.
+            """;
+
+        try
+        {
+            _log($"  Generating missing {fileRole}.sql from AI_Input.txt...");
+            var client = new ChatClient(_config.OpenAI.Model, apiKey);
+            var completion = await client.CompleteChatAsync(prompt);
+            var sql = completion.Value.Content[0].Text?.Trim() ?? "";
+            // Strip markdown fences if AI wrapped it anyway
+            sql = Regex.Replace(sql, @"```\w*\r?\n?", "").Trim();
+            return string.IsNullOrWhiteSpace(sql) ? null : sql;
+        }
+        catch (Exception ex)
+        {
+            _log($"  ERROR generating {fileRole}.sql from AI_Input.txt: {ex.Message}");
+            return null;
+        }
+    }
+
+    private async Task<SchemaDiscoveryResult> GatherSchemaInfoWithAiAsync(SqlConnection conn, string beforeSql, string aiInput, string apiKey)
     {
         var identifiedBaseTables = new List<(string Schema, string Table)>();
         var client = new ChatClient(_config.OpenAI.Model, apiKey);
@@ -598,7 +644,16 @@ public class AiOptimizer
                 "10. Your final response to the user should ONLY be the final markdown summary of the schema context (not the base table list — that was already registered).")
         };
 
-        messages.Add(new UserChatMessage($"Here is the SQL query to optimize:\n\n```sql\n{beforeSql}\n```\n\nPlease use your tools to explore the schema and then output the full schema context."));
+        var userMsg = new StringBuilder();
+        userMsg.AppendLine($"Here is the SQL query to optimize:\n\n```sql\n{beforeSql}\n```");
+        if (!string.IsNullOrWhiteSpace(aiInput))
+        {
+            userMsg.AppendLine();
+            userMsg.AppendLine("## Additional Context (from AI_Input.txt)");
+            userMsg.AppendLine(aiInput);
+        }
+        userMsg.AppendLine("\nPlease use your tools to explore the schema and then output the full schema context.");
+        messages.Add(new UserChatMessage(userMsg.ToString()));
 
         var options = new ChatCompletionOptions
         {
@@ -810,7 +865,8 @@ ORDER BY i.index_id";
     BenchmarkResult beforeResult,
     string previousAttempts,
     int attemptNumber,
-    List<(string Schema, string Table)> baseTables)
+    List<(string Schema, string Table)> baseTables,
+    string aiInput = "")
 {
     var sb = new StringBuilder();
     sb.AppendLine("You are a MSSQL 2025 performance optimization expert.");
@@ -840,6 +896,13 @@ ORDER BY i.index_id";
     sb.AppendLine("## Additional Domain Knowledge");
     sb.AppendLine("- Important: Most relationships in this database have `PartyId` as part of their composite foreign key. Consider this when designing indexes, join support structures, computed columns, constraints, and partition-aligned access paths.");
     sb.AppendLine();
+
+    if (!string.IsNullOrWhiteSpace(aiInput))
+    {
+        sb.AppendLine("## Test Description (from AI_Input.txt)");
+        sb.AppendLine(aiInput);
+        sb.AppendLine();
+    }
 
     if (!string.IsNullOrWhiteSpace(previousAttempts))
     {
@@ -1025,7 +1088,8 @@ ORDER BY i.index_id";
     string beforeSql,
     string schemaInfo,
     BenchmarkResult beforeResult,
-    string previousAttempts)
+    string previousAttempts,
+    string aiInput = "")
 {
     var sb = new StringBuilder();
     sb.AppendLine("You are a MSSQL 2025 performance optimization expert.");
@@ -1050,6 +1114,12 @@ ORDER BY i.index_id";
     sb.AppendLine("## Database Schema Information");
     sb.AppendLine(schemaInfo);
     sb.AppendLine();
+    if (!string.IsNullOrWhiteSpace(aiInput))
+    {
+        sb.AppendLine("## Test Description (from AI_Input.txt)");
+        sb.AppendLine(aiInput);
+        sb.AppendLine();
+    }
     sb.AppendLine("## Summary of All Previous Attempts");
     sb.AppendLine(previousAttempts);
     sb.AppendLine();

@@ -294,10 +294,12 @@ public class ReportGenerator
         sb.AppendLine("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">");
         sb.AppendLine("  <title>Benchmark Overall Summary</title>");
         sb.AppendLine("  <meta http-equiv=\"refresh\" content=\"10\">"); // Auto-refresh every 10 seconds
+        sb.AppendLine("  <script src=\"https://cdn.jsdelivr.net/npm/chart.js@4\"></script>");
         sb.AppendLine("  <style>");
         sb.AppendLine(@"
     body { font-family: 'Segoe UI', Tahoma, sans-serif; margin: 20px; background: #f8f9fa; color: #333; }
     h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+    h2 { color: #2980b9; margin-top: 30px; }
     table { border-collapse: collapse; width: 100%; margin: 20px 0; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
     th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ecf0f1; }
     th { background: #3498db; color: white; }
@@ -306,6 +308,7 @@ public class ReportGenerator
     .status-Failed { color: #e74c3c; }
     .improvement { color: #27ae60; font-weight: bold; }
     .regression { color: #e74c3c; font-weight: bold; }
+    .chart-container { max-width: 900px; margin: 20px auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
 ");
         sb.AppendLine("  </style>");
         sb.AppendLine("</head>");
@@ -342,12 +345,80 @@ public class ReportGenerator
         }
 
         sb.AppendLine("  </table>");
+
+        // Charts — only rendered for optimizations that have both before and after data
+        var withData = summaries.Where(s => s.BeforeElapsed.HasValue && s.BestAfterElapsed.HasValue).ToList();
+        if (withData.Count > 0)
+        {
+            var chartLabels = string.Join(",", withData.Select(s => $"'{EscapeJsString(s.FolderName)}'"));
+            var beforeElapsedData = string.Join(",", withData.Select(s => $"{s.BeforeElapsed:F0}"));
+            var afterElapsedData = string.Join(",", withData.Select(s => $"{s.BestAfterElapsed:F0}"));
+            var beforeCpuData = string.Join(",", withData.Select(s => $"{s.BeforeCpu:F0}"));
+            var afterCpuData = string.Join(",", withData.Select(s => $"{s.BestAfterCpu:F0}"));
+
+            // Chart 1: Before vs Best After — Elapsed Time
+            sb.AppendLine("  <h2>Before vs Best After — Elapsed Time (ms)</h2>");
+            sb.AppendLine("  <div class=\"chart-container\">");
+            sb.AppendLine("    <canvas id=\"chartSummaryElapsed\"></canvas>");
+            sb.AppendLine("  </div>");
+            sb.AppendLine("  <script>");
+            sb.AppendLine("  new Chart(document.getElementById('chartSummaryElapsed'), {");
+            sb.AppendLine("    type: 'bar',");
+            sb.AppendLine($"    data: {{ labels: [{chartLabels}], datasets: [");
+            sb.AppendLine($"      {{ label: 'Before (ms)', data: [{beforeElapsedData}], backgroundColor: 'rgba(231,76,60,0.7)', borderColor: 'rgba(231,76,60,1)', borderWidth: 1 }},");
+            sb.AppendLine($"      {{ label: 'Best After (ms)', data: [{afterElapsedData}], backgroundColor: 'rgba(46,204,113,0.7)', borderColor: 'rgba(46,204,113,1)', borderWidth: 1 }}");
+            sb.AppendLine("    ]},");
+            sb.AppendLine("    options: { responsive: true, plugins: { title: { display: true, text: 'Before vs Best After — Elapsed Time (ms)' }, legend: { position: 'top' } }, scales: { y: { beginAtZero: true, title: { display: true, text: 'Elapsed Time (ms)' } } } }");
+            sb.AppendLine("  });");
+            sb.AppendLine("  </script>");
+
+            // Chart 2: Before vs Best After — CPU Time
+            sb.AppendLine("  <h2>Before vs Best After — CPU Time (ms)</h2>");
+            sb.AppendLine("  <div class=\"chart-container\">");
+            sb.AppendLine("    <canvas id=\"chartSummaryCpu\"></canvas>");
+            sb.AppendLine("  </div>");
+            sb.AppendLine("  <script>");
+            sb.AppendLine("  new Chart(document.getElementById('chartSummaryCpu'), {");
+            sb.AppendLine("    type: 'bar',");
+            sb.AppendLine($"    data: {{ labels: [{chartLabels}], datasets: [");
+            sb.AppendLine($"      {{ label: 'Before CPU (ms)', data: [{beforeCpuData}], backgroundColor: 'rgba(155,89,182,0.7)', borderColor: 'rgba(155,89,182,1)', borderWidth: 1 }},");
+            sb.AppendLine($"      {{ label: 'Best After CPU (ms)', data: [{afterCpuData}], backgroundColor: 'rgba(52,152,219,0.7)', borderColor: 'rgba(52,152,219,1)', borderWidth: 1 }}");
+            sb.AppendLine("    ]},");
+            sb.AppendLine("    options: { responsive: true, plugins: { title: { display: true, text: 'Before vs Best After — CPU Time (ms)' }, legend: { position: 'top' } }, scales: { y: { beginAtZero: true, title: { display: true, text: 'CPU Time (ms)' } } } }");
+            sb.AppendLine("  });");
+            sb.AppendLine("  </script>");
+
+            // Chart 3: Improvement % per optimization
+            var improvementData = string.Join(",", withData.Select(s =>
+                s.BeforeElapsed > 0 ? $"{(1 - s.BestAfterElapsed!.Value / s.BeforeElapsed!.Value) * 100:F1}" : "0"));
+            var improvementColors = string.Join(",", withData.Select(s =>
+                s.BeforeElapsed > 0 && (1 - s.BestAfterElapsed!.Value / s.BeforeElapsed!.Value) >= 0
+                    ? "'rgba(46,204,113,0.7)'"
+                    : "'rgba(231,76,60,0.7)'"));
+
+            sb.AppendLine("  <h2>Elapsed Time Improvement % per Optimization</h2>");
+            sb.AppendLine("  <div class=\"chart-container\">");
+            sb.AppendLine("    <canvas id=\"chartSummaryImprovement\"></canvas>");
+            sb.AppendLine("  </div>");
+            sb.AppendLine("  <script>");
+            sb.AppendLine("  new Chart(document.getElementById('chartSummaryImprovement'), {");
+            sb.AppendLine("    type: 'bar',");
+            sb.AppendLine($"    data: {{ labels: [{chartLabels}], datasets: [");
+            sb.AppendLine($"      {{ label: 'Improvement (%)', data: [{improvementData}], backgroundColor: [{improvementColors}], borderWidth: 1 }}");
+            sb.AppendLine("    ]},");
+            sb.AppendLine("    options: { responsive: true, plugins: { title: { display: true, text: 'Elapsed Time Improvement % (positive = faster)' }, legend: { display: false } }, scales: { y: { title: { display: true, text: 'Improvement (%)' } } } }");
+            sb.AppendLine("  });");
+            sb.AppendLine("  </script>");
+        }
+
         sb.AppendLine("</body>");
         sb.AppendLine("</html>");
 
         var reportPath = Path.Combine(runFolder, "summary.html");
         File.WriteAllText(reportPath, sb.ToString());
     }
+
+    private static string EscapeJsString(string s) => s.Replace("\\", "\\\\").Replace("'", "\\'");
 
     private static void AppendResultSection(StringBuilder sb, string label, BenchmarkResult result)
     {

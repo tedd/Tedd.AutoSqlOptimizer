@@ -94,57 +94,35 @@ public class BenchmarkRunner
 
         try
         {
-            var initSqlPathsToTry = new[]
-            {
-                Path.Combine(optimizationsPath,  "init.sql")
-            };
+            var initSqlPath = new[] { Path.Combine(optimizationsPath, "init.sql") }
+                .FirstOrDefault(File.Exists);
 
-            var initSqlPath = initSqlPathsToTry.FirstOrDefault(File.Exists);
-
-            if (initSqlPath != null)
-            {
-                combinedLog($"\n--- Executing init.sql ({initSqlPath}) ---");
-                var initSql = await File.ReadAllTextAsync(initSqlPath);
-
-                var builder = new SqlConnectionStringBuilder(_config.ConnectionString);
-                if (initSql.Contains("RESTORE DATABASE", StringComparison.OrdinalIgnoreCase))
-                {
-                    builder.InitialCatalog = "master";
-                }
-
-                using var initConn = new SqlConnection(builder.ConnectionString);
-                await initConn.OpenAsync();
-
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                var batches = System.Text.RegularExpressions.Regex.Split(initSql, @"^\s*GO\s*$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
-                foreach (var batch in batches)
-                {
-                    var trimmed = batch.Trim();
-                    if (string.IsNullOrEmpty(trimmed)) continue;
-
-                    combinedLog($"[DEBUG SQL] Executing init batch:\n{trimmed}");
-                    var batchSw = System.Diagnostics.Stopwatch.StartNew();
-                    using var cmd = new SqlCommand(trimmed, initConn);
-                    cmd.CommandTimeout = 1200;
-                    await cmd.ExecuteNonQueryAsync();
-                    batchSw.Stop();
-                    combinedLog($"[DEBUG SQL] Batch executed in {batchSw.ElapsedMilliseconds} ms");
-                }
-                sw.Stop();
-                combinedLog($"--- init.sql execution completed in {sw.ElapsedMilliseconds} ms ---\n");
-            }
+            // Run init.sql once up-front unless the per-test option is enabled
+            if (initSqlPath != null && !_config.RunInitBeforeEachTest)
+                await ExecuteInitSqlAsync(initSqlPath, combinedLog);
 
             using var conn = new SqlConnection(_config.ConnectionString);
             conn.Open();
             combinedLog($"Connected to SQL Server: {conn.ServerVersion}");
 
+            var previousRevertFailed = false;
             foreach (var folder in folders)
             {
+                // Run init.sql once per test type when the option is enabled
+                if (initSqlPath != null && _config.RunInitBeforeEachTest)
+                    await ExecuteInitSqlAsync(initSqlPath, combinedLog);
+                // Run init.sql if the previous test's revert failed and left the DB in a dirty state
+                else if (initSqlPath != null && _config.RunInitBeforeNextTestIfRevertFailed && previousRevertFailed)
+                {
+                    combinedLog("  Previous revert failed — running init.sql to restore clean DB state.");
+                    await ExecuteInitSqlAsync(initSqlPath, combinedLog);
+                }
+
                 var summary = summaries.FirstOrDefault(s => s.FolderName == Path.GetFileName(folder));
                 if (summary != null) summary.Status = "Running";
                 reportGenerator.GenerateSummaryReport(runFolder, summaries, _config.TimingMetric);
 
-                await ProcessOptimizationFolder(conn, folder, runFolder, sqlExecutor, aiOptimizer, reportGenerator, combinedLog, summary, summaries);
+                previousRevertFailed = await ProcessOptimizationFolder(conn, folder, runFolder, sqlExecutor, aiOptimizer, reportGenerator, combinedLog, summary, summaries);
 
                 if (summary != null && summary.Status == "Running") summary.Status = "Done";
                 reportGenerator.GenerateSummaryReport(runFolder, summaries, _config.TimingMetric);
@@ -162,7 +140,43 @@ public class BenchmarkRunner
         _log($"\nRun complete. Results in: {runFolder}");
     }
 
-    private async Task ProcessOptimizationFolder(
+    private async Task ExecuteInitSqlAsync(string initSqlPath, Action<string> log)
+    {
+        log($"\n--- Executing init.sql ({initSqlPath}) ---");
+        var initSql = await File.ReadAllTextAsync(initSqlPath);
+
+        var builder = new SqlConnectionStringBuilder(_config.ConnectionString);
+        if (initSql.Contains("RESTORE DATABASE", StringComparison.OrdinalIgnoreCase))
+            builder.InitialCatalog = "master";
+
+        using var initConn = new SqlConnection(builder.ConnectionString);
+        await initConn.OpenAsync();
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var batches = System.Text.RegularExpressions.Regex.Split(
+            initSql, @"^\s*GO\s*$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
+
+        foreach (var batch in batches)
+        {
+            var trimmed = batch.Trim();
+            if (string.IsNullOrEmpty(trimmed)) continue;
+
+            log($"[DEBUG SQL] Executing init batch:\n{trimmed}");
+            var batchSw = System.Diagnostics.Stopwatch.StartNew();
+            using var cmd = new SqlCommand(trimmed, initConn);
+            cmd.CommandTimeout = 1200;
+            await cmd.ExecuteNonQueryAsync();
+            batchSw.Stop();
+            log($"[DEBUG SQL] Batch executed in {batchSw.ElapsedMilliseconds} ms");
+        }
+
+        sw.Stop();
+        log($"--- init.sql execution completed in {sw.ElapsedMilliseconds} ms ---\n");
+    }
+
+    /// <returns>True if the revert failed or could not be confirmed, meaning the DB may be in a dirty state.</returns>
+    private async Task<bool> ProcessOptimizationFolder(
         SqlConnection conn,
         string folderPath,
         string runFolder,
@@ -174,16 +188,57 @@ public class BenchmarkRunner
         List<OptimizationSummary> allSummaries)
     {
         var optimization = OptimizationFolder.Load(folderPath);
+
+        // Generate missing SQL files from AI_Input.txt if present
+        if (!string.IsNullOrWhiteSpace(optimization.AiInput))
+        {
+            if (string.IsNullOrWhiteSpace(optimization.BeforeSql))
+            {
+                log($"  AI_Input.txt found and 1_before.sql is missing — asking AI to generate it...");
+                var generated = await aiOptimizer.GenerateMissingSqlAsync(optimization.AiInput, "1_before");
+                if (generated != null)
+                {
+                    optimization.BeforeSql = generated;
+                    log($"  Generated 1_before.sql ({generated.Length} chars).");
+                    File.WriteAllText(System.IO.Path.Combine(folderPath, "1_before.sql"), generated);
+                }
+                else
+                {
+                    log($"  WARNING: Could not generate 1_before.sql from AI_Input.txt.");
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(optimization.AfterSql) && !string.IsNullOrWhiteSpace(optimization.BeforeSql))
+            {
+                log($"  3_after.sql is missing — defaulting to 1_before.sql.");
+                optimization.AfterSql = optimization.BeforeSql;
+            }
+        }
+        else if (string.IsNullOrWhiteSpace(optimization.AfterSql) && !string.IsNullOrWhiteSpace(optimization.BeforeSql))
+        {
+            log($"  3_after.sql is missing — defaulting to 1_before.sql.");
+            optimization.AfterSql = optimization.BeforeSql;
+        }
+
+        if (string.IsNullOrWhiteSpace(optimization.BeforeSql))
+        {
+            log($"  ERROR: No 1_before.sql and no AI_Input.txt to generate it from. Skipping folder.");
+            return false;
+        }
+
         log($"{new string('=', 60)}");
         log($"Processing: {optimization.Name}");
         log($"{new string('=', 60)}");
         log($"  AI Mode: {optimization.IsAiMode}");
+        log($"  AI Input: {(string.IsNullOrWhiteSpace(optimization.AiInput) ? "(none)" : $"{optimization.AiInput.Length} chars")}");
         log($"  Before SQL ({optimization.BeforeSql.Length} chars): {optimization.BeforeSql[..Math.Min(200, optimization.BeforeSql.Length)]}...");
 
         var outputFolder = Path.Combine(runFolder, optimization.Name);
         Directory.CreateDirectory(outputFolder);
 
         // Save the SQL files to output for reference
+        if (!string.IsNullOrWhiteSpace(optimization.AiInput))
+            File.WriteAllText(Path.Combine(outputFolder, "AI_Input.txt"), optimization.AiInput);
         File.WriteAllText(Path.Combine(outputFolder, "1_before.sql"), optimization.BeforeSql);
         File.WriteAllText(Path.Combine(outputFolder, "3_after.sql"), optimization.AfterSql);
         if (!optimization.IsAiMode)
@@ -198,6 +253,8 @@ public class BenchmarkRunner
         var optimizationName = optimization.Name;
 
         string? benchmarkError = null;
+        bool optimizeApplied = false; // tracks whether the optimization was applied so we know if revert is needed
+        bool revertFailed = false;
         try
         {
             // Phase 1: Warm-up
@@ -260,6 +317,7 @@ public class BenchmarkRunner
                         reportGenerator.GenerateSummaryReport(runFolder, allSummaries, _config.TimingMetric);
                     }
                 });
+                revertFailed = aiResults?.Any(r => !r.RevertSucceeded) ?? false;
             }
             else
             {
@@ -267,6 +325,7 @@ public class BenchmarkRunner
                 log("--- Applying Optimization ---");
                 sqlExecutor.ExecuteNonQuery(conn, optimization.OptimizeSql);
                 log("  Optimization applied successfully.");
+                optimizeApplied = true;
 
                 // Update statistics after applying optimization schema/index changes
                 sqlExecutor.UpdateStatistics(conn);
@@ -301,9 +360,6 @@ public class BenchmarkRunner
                 sqlExecutor.ExecuteNonQuery(conn, optimization.RevertSql);
                 log("  Revert applied successfully.");
 
-                // Update statistics after reverting changes
-                sqlExecutor.UpdateStatistics(conn);
-
                 // Verify revert
                 log("  Verifying revert...");
                 sqlExecutor.ClearCache(conn);
@@ -316,6 +372,9 @@ public class BenchmarkRunner
             benchmarkError = ex.ToString();
             log($"  ERROR during benchmark phases: {ex.Message}");
             if (summary != null) summary.Status = "Failed";
+            // If the optimization was applied but we caught an exception, revert did not complete
+            if (optimizeApplied)
+                revertFailed = true;
         }
 
         // Generate reports
@@ -332,5 +391,6 @@ public class BenchmarkRunner
         }
 
         log($"\nDone processing {optimization.Name}.");
+        return revertFailed;
     }
 }

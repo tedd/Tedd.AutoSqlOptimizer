@@ -32,30 +32,44 @@ public class SqlExecutor
             messages.Add(e.Message);
         }
 
+        var batches = SplitOnGo(sql);
+
         conn.InfoMessage += InfoHandler;
         try
         {
-            var wrappedSql = "SET STATISTICS TIME ON;\n" + sql + "\nSET STATISTICS TIME OFF;";
-            using var cmd = new SqlCommand(wrappedSql, conn);
-            cmd.CommandTimeout = _timeoutSeconds; // 10 minutes
-            cmd.ExecuteNonQuery();
+            using (var cmdOn = new SqlCommand("SET STATISTICS TIME ON;", conn))
+            {
+                cmdOn.CommandTimeout = _timeoutSeconds;
+                cmdOn.ExecuteNonQuery();
+            }
+
+            foreach (var batch in batches)
+            {
+                using var cmd = new SqlCommand(batch, conn);
+                cmd.CommandTimeout = _timeoutSeconds;
+                cmd.ExecuteNonQuery();
+            }
+
+            using (var cmdOff = new SqlCommand("SET STATISTICS TIME OFF;", conn))
+            {
+                cmdOff.CommandTimeout = _timeoutSeconds;
+                cmdOff.ExecuteNonQuery();
+            }
         }
         finally
         {
             conn.InfoMessage -= InfoHandler;
         }
 
-        // Parse timing from InfoMessage output
-        // We want the LAST "SQL Server Execution Times:" line (the actual execution, not parse/compile)
+        // Parse timing from InfoMessage output and accumulate across all GO batches
         foreach (var msg in messages)
         {
             _log($"  [InfoMessage] {msg}");
             var matches = TimingRegex.Matches(msg);
             foreach (Match match in matches)
             {
-                result.CpuTimeMs = int.Parse(match.Groups[1].Value);
-                result.ElapsedTimeMs = int.Parse(match.Groups[2].Value);
-                // Keep overwriting — we want the last execution time
+                result.CpuTimeMs += int.Parse(match.Groups[1].Value);
+                result.ElapsedTimeMs += int.Parse(match.Groups[2].Value);
             }
         }
 
@@ -116,17 +130,10 @@ IF @TimedOut = 1
 
     public void ExecuteNonQuery(SqlConnection conn, string sql)
     {
-        // Split on GO statements for multi-batch scripts
-        var batches = Regex.Split(sql, @"^\s*GO\s*$",
-            RegexOptions.IgnoreCase | RegexOptions.Multiline);
-
-        foreach (var batch in batches)
+        foreach (var batch in SplitOnGo(sql))
         {
-            var trimmed = batch.Trim();
-            if (string.IsNullOrEmpty(trimmed)) continue;
-
-            _log($"[DEBUG SQL] ExecuteNonQuery batch:\n{trimmed}");
-            using var cmd = new SqlCommand(trimmed, conn);
+            _log($"[DEBUG SQL] ExecuteNonQuery batch:\n{batch}");
+            using var cmd = new SqlCommand(batch, conn);
             cmd.CommandTimeout = _timeoutSeconds;
             cmd.ExecuteNonQuery();
         }
@@ -135,10 +142,25 @@ IF @TimedOut = 1
     public string ExecuteScalar(SqlConnection conn, string sql)
     {
         _log($"[DEBUG SQL] ExecuteScalar:\n{sql}");
-        using var cmd = new SqlCommand(sql, conn);
-        cmd.CommandTimeout = _timeoutSeconds;
-        var result = cmd.ExecuteScalar();
+        var batches = SplitOnGo(sql);
+        object? result = null;
+        foreach (var batch in batches)
+        {
+            using var cmd = new SqlCommand(batch, conn);
+            cmd.CommandTimeout = _timeoutSeconds;
+            result = cmd.ExecuteScalar();
+        }
         return result?.ToString() ?? "";
+    }
+
+    private static IReadOnlyList<string> SplitOnGo(string sql)
+    {
+        var batches = Regex.Split(sql, @"^\s*GO\s*$",
+            RegexOptions.IgnoreCase | RegexOptions.Multiline);
+        return batches
+            .Select(b => b.Trim())
+            .Where(b => !string.IsNullOrEmpty(b))
+            .ToList();
     }
 
     public List<Dictionary<string, string>> ExecuteQuery(SqlConnection conn, string sql)
