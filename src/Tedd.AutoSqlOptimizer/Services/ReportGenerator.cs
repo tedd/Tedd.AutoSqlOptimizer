@@ -1,6 +1,8 @@
-using Tedd.AutoSqlOptimizer.Models;
-
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+using Tedd.AutoSqlOptimizer.Models;
 
 using static Tedd.AutoSqlOptimizer.Services.AiOptimizer;
 
@@ -10,13 +12,20 @@ public class ReportGenerator
 {
     private readonly Action<string> _log;
 
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
     public ReportGenerator(Action<string> log)
     {
         _log = log;
     }
 
     // ───────────────────────────────────────────────────
-    //  MARKDOWN REPORTS (unchanged logic, kept for compatibility)
+    //  MARKDOWN REPORT (individual run)
     // ───────────────────────────────────────────────────
 
     public void GenerateMarkdownReport(
@@ -28,12 +37,12 @@ public class ReportGenerator
         List<AiOptimizationResult>? aiResults = null,
         string? errorMessage = null)
     {
-        var metricLabel = timingMetric.Equals("Average", StringComparison.OrdinalIgnoreCase) ? "avg" : "min";
+        var metricLabel = timingMetric.Equals("Average", StringComparison.OrdinalIgnoreCase) ? "Avg" : "Min";
         var sb = new StringBuilder();
         var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        sb.AppendLine($"# Benchmark Results — {timestamp}");
+        sb.AppendLine($"# Benchmark Results — {optimizationName}");
         sb.AppendLine();
-        sb.AppendLine($"## {optimizationName}");
+        sb.AppendLine($"*Generated: {timestamp}*");
         sb.AppendLine();
 
         if (!string.IsNullOrEmpty(errorMessage))
@@ -44,56 +53,281 @@ public class ReportGenerator
             sb.AppendLine();
         }
 
-        AppendResultSection(sb, "Before Optimization", beforeResult);
+        // ── Best Results Summary ──
+        var beforeCpuVal = beforeResult.GetCpuValue(timingMetric);
+        var beforeElapsedVal = beforeResult.GetElapsedValue(timingMetric);
 
-        if (afterResult != null)
-        {
-            AppendResultSection(sb, "After Optimization", afterResult);
-            AppendImprovementTable(sb, beforeResult, afterResult, timingMetric);
-        }
-
+        BenchmarkResult? bestResult = afterResult;
+        string bestLabel = "Manual";
         if (aiResults != null && aiResults.Count > 0)
         {
-            sb.AppendLine("### AI Optimization Results");
+            var bestAi = aiResults
+                .Where(a => a.AfterResult != null && a.OptimizeSucceeded)
+                .OrderBy(a => a.AfterResult!.GetElapsedValue(timingMetric))
+                .FirstOrDefault();
+            if (bestAi != null && (bestResult == null || bestAi.AfterResult!.GetElapsedValue(timingMetric) < bestResult.GetElapsedValue(timingMetric)))
+            {
+                bestResult = bestAi.AfterResult;
+                bestLabel = bestAi.Name;
+            }
+        }
+
+        sb.AppendLine("## Best Results");
+        sb.AppendLine();
+        sb.AppendLine($"| Metric | Before ({metricLabel}) | Best After ({metricLabel}) | Improvement | Strategy |");
+        sb.AppendLine("|--------|-------------|------------------|-------------|----------|");
+
+        if (bestResult != null)
+        {
+            var bestElapsed = bestResult.GetElapsedValue(timingMetric);
+            var bestCpu = bestResult.GetCpuValue(timingMetric);
+            var elapsedPct = beforeElapsedVal > 0 ? (1 - bestElapsed / beforeElapsedVal) * 100 : 0;
+            var cpuPct = beforeCpuVal > 0 ? (1 - bestCpu / beforeCpuVal) * 100 : 0;
+            sb.AppendLine($"| Elapsed | {beforeElapsedVal:F0}ms | {bestElapsed:F0}ms | {elapsedPct:+0.1;-0.1}% | {bestLabel} |");
+            sb.AppendLine($"| CPU | {beforeCpuVal:F0}ms | {bestCpu:F0}ms | {cpuPct:+0.1;-0.1}% | {bestLabel} |");
+        }
+        else
+        {
+            sb.AppendLine($"| Elapsed | {beforeElapsedVal:F0}ms | — | — | — |");
+            sb.AppendLine($"| CPU | {beforeCpuVal:F0}ms | — | — | — |");
+        }
+        sb.AppendLine();
+
+        // ── Run Statistics ──
+        var totalAttempts = (aiResults?.Count ?? 0) + (afterResult != null ? 1 : 0);
+        var successfulAttempts = (aiResults?.Count(a => a.OptimizeSucceeded && a.AfterResult != null) ?? 0) + (afterResult != null ? 1 : 0);
+        var aiCount = aiResults?.Count ?? 0;
+        var manualCount = afterResult != null ? 1 : 0;
+
+        sb.AppendLine("## Run Statistics");
+        sb.AppendLine();
+        sb.AppendLine($"- **Total Attempts:** {totalAttempts}");
+        sb.AppendLine($"- **Successful:** {successfulAttempts}");
+        sb.AppendLine($"- **AI Optimizations:** {aiCount}");
+        sb.AppendLine($"- **Manual Tests:** {manualCount}");
+        sb.AppendLine();
+
+        // ── AI Analysis Narrative ──
+        if (aiResults != null && aiResults.Count > 0)
+        {
+            var successfulAi = aiResults.Where(a => a.AfterResult != null && a.OptimizeSucceeded).ToList();
+            sb.AppendLine("## AI Optimization Analysis");
+            sb.AppendLine();
+
+            if (successfulAi.Count > 0)
+            {
+                var bestAi = successfulAi.OrderBy(a => a.AfterResult!.GetElapsedValue(timingMetric)).First();
+                var bestElapsedPct = beforeElapsedVal > 0
+                    ? (1 - bestAi.AfterResult!.GetElapsedValue(timingMetric) / beforeElapsedVal) * 100 : 0;
+                sb.AppendLine($"The AI ran **{aiResults.Count} optimization attempt(s)**, of which **{successfulAi.Count}** applied successfully.");
+                sb.AppendLine($"The best performing optimization was **{bestAi.Name}**: *{bestAi.Description}*, achieving a **{bestElapsedPct:F1}%** elapsed time improvement.");
+                sb.AppendLine();
+
+                sb.AppendLine("### Iteration-by-Iteration Progression");
+                sb.AppendLine();
+                foreach (var ai in aiResults)
+                {
+                    var status = ai.OptimizeSucceeded ? "OK" : "FAIL";
+                    if (ai.AfterResult != null && ai.OptimizeSucceeded)
+                    {
+                        var ePct = beforeElapsedVal > 0
+                            ? (1 - ai.AfterResult.GetElapsedValue(timingMetric) / beforeElapsedVal) * 100 : 0;
+                        sb.AppendLine($"1. **[{status}]** **{ai.Name}**: {ai.Description} — {ePct:+0.1;-0.1}% elapsed");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"1. **[{status}]** **{ai.Name}**: {ai.Description} — {(ai.OptimizeSucceeded ? "no timing data" : ai.ErrorMessage ?? "failed to apply")}");
+                    }
+                }
+                sb.AppendLine();
+            }
+            else
+            {
+                sb.AppendLine("The AI ran optimization attempts but none applied successfully.");
+                sb.AppendLine();
+            }
+        }
+
+        // ── AI Results Table ──
+        if (aiResults != null && aiResults.Count > 0)
+        {
+            sb.AppendLine("## All Optimization Attempts");
             sb.AppendLine();
 
             var headerCpu = timingMetric.Equals("Average", StringComparison.OrdinalIgnoreCase) ? "Avg CPU (ms)" : "Min CPU (ms)";
             var headerElapsed = timingMetric.Equals("Average", StringComparison.OrdinalIgnoreCase) ? "Avg Elapsed (ms)" : "Min Elapsed (ms)";
-            sb.AppendLine($"| # | Description | Optimize | Revert | {headerCpu} | {headerElapsed} | CPU Δ | Elapsed Δ |");
-            sb.AppendLine("|---|-------------|----------|--------|-------------|-------------------|-------|-----------|");
+            sb.AppendLine($"| # | Description | Apply | Revert | {headerCpu} | {headerElapsed} | CPU Δ | Elapsed Δ | Data OK |");
+            sb.AppendLine("|---|-------------|-------|--------|-------------|-------------------|-------|-----------|---------|");
 
             foreach (var ai in aiResults)
             {
                 var valCpu = ai.AfterResult?.GetCpuValue(timingMetric).ToString("F0") ?? "—";
                 var valElapsed = ai.AfterResult?.GetElapsedValue(timingMetric).ToString("F0") ?? "—";
-
-                var beforeCpu = beforeResult.GetCpuValue(timingMetric);
-                var beforeElapsed = beforeResult.GetElapsedValue(timingMetric);
-
-                var cpuDelta = ai.AfterResult != null && beforeCpu > 0
-                    ? $"{(1 - ai.AfterResult.GetCpuValue(timingMetric) / beforeCpu) * 100:F1}%"
+                var cpuDelta = ai.AfterResult != null && beforeCpuVal > 0
+                    ? $"{(1 - ai.AfterResult.GetCpuValue(timingMetric) / beforeCpuVal) * 100:F1}%"
                     : "—";
-                var elapsedDelta = ai.AfterResult != null && beforeElapsed > 0
-                    ? $"{(1 - ai.AfterResult.GetElapsedValue(timingMetric) / beforeElapsed) * 100:F1}%"
+                var elapsedDelta = ai.AfterResult != null && beforeElapsedVal > 0
+                    ? $"{(1 - ai.AfterResult.GetElapsedValue(timingMetric) / beforeElapsedVal) * 100:F1}%"
                     : "—";
+                var integrity = ai.DataIntegrityOk ? "OK" : "FAIL";
 
-                sb.AppendLine($"| {ai.Name} | {ai.Description} | {(ai.OptimizeSucceeded ? "OK" : "FAIL")} ({ai.OptimizeAttempts}) | {(ai.RevertSucceeded ? "OK" : "FAIL")} ({ai.RevertAttempts}) | {valCpu} | {valElapsed} | {cpuDelta} | {elapsedDelta} |");
+                sb.AppendLine($"| {ai.Name} | {ai.Description} | {(ai.OptimizeSucceeded ? "OK" : "FAIL")} ({ai.OptimizeAttempts}) | {(ai.RevertSucceeded ? "OK" : "FAIL")} ({ai.RevertAttempts}) | {valCpu} | {valElapsed} | {cpuDelta} | {elapsedDelta} | {integrity} |");
             }
-
             sb.AppendLine();
+        }
 
+        // ── Raw Data ──
+        AppendResultSection(sb, "Before Optimization", beforeResult);
+        if (afterResult != null)
+        {
+            AppendResultSection(sb, "After Optimization (Manual)", afterResult);
+            AppendImprovementTable(sb, beforeResult, afterResult, timingMetric);
+        }
+        if (aiResults != null)
+        {
             foreach (var ai in aiResults.Where(a => a.AfterResult != null))
             {
-                sb.AppendLine($"#### {ai.Name}: {ai.Description}");
-                sb.AppendLine();
                 AppendResultSection(sb, $"{ai.Name} — After", ai.AfterResult!);
                 AppendImprovementTable(sb, beforeResult, ai.AfterResult!, timingMetric);
             }
         }
 
+        // ── Technical Details: SQL files ──
+        sb.AppendLine("## Technical Details");
+        sb.AppendLine();
+        AppendSqlFileSection(sb, outputFolder, "1_before.sql", "Benchmark Query");
+        AppendSqlFileSection(sb, outputFolder, "3_after.sql", "After Query");
+        AppendSqlFileSection(sb, outputFolder, "2_optimize.sql", "Manual Optimization");
+        AppendSqlFileSection(sb, outputFolder, "4_revert.sql", "Manual Revert");
+
+        // AI Input
+        var aiInputContent = TryReadFile(Path.Combine(outputFolder, "AI_Input.txt"));
+        if (!string.IsNullOrWhiteSpace(aiInputContent))
+        {
+            sb.AppendLine("### AI Input");
+            sb.AppendLine();
+            sb.AppendLine("```");
+            sb.AppendLine(aiInputContent);
+            sb.AppendLine("```");
+            sb.AppendLine();
+        }
+
+        // How to reproduce
+        if (bestResult != null)
+        {
+            sb.AppendLine("## How to Reproduce");
+            sb.AppendLine();
+            sb.AppendLine("To achieve the best optimization result, execute the `2_optimize.sql` file from the best-performing attempt folder against your database.");
+            sb.AppendLine("The optimization can be reverted by executing `4_revert.sql` from the same folder.");
+            sb.AppendLine();
+        }
+
         var reportPath = Path.Combine(outputFolder, "results.md");
         File.WriteAllText(reportPath, sb.ToString());
         _log($"Markdown report written to {reportPath}");
+    }
+
+    // ───────────────────────────────────────────────────
+    //  JSON REPORT (individual run)
+    // ───────────────────────────────────────────────────
+
+    public void GenerateJsonReport(
+        string outputFolder,
+        string optimizationName,
+        BenchmarkResult beforeResult,
+        BenchmarkResult? afterResult,
+        string timingMetric,
+        List<AiOptimizationResult>? aiResults = null,
+        string? errorMessage = null)
+    {
+        var beforeCpuVal = beforeResult.GetCpuValue(timingMetric);
+        var beforeElapsedVal = beforeResult.GetElapsedValue(timingMetric);
+
+        // Find best result
+        BenchmarkResult? bestResult = afterResult;
+        string bestLabel = "Manual";
+        if (aiResults != null && aiResults.Count > 0)
+        {
+            var bestAi = aiResults
+                .Where(a => a.AfterResult != null && a.OptimizeSucceeded)
+                .OrderBy(a => a.AfterResult!.GetElapsedValue(timingMetric))
+                .FirstOrDefault();
+            if (bestAi != null && (bestResult == null || bestAi.AfterResult!.GetElapsedValue(timingMetric) < bestResult.GetElapsedValue(timingMetric)))
+            {
+                bestResult = bestAi.AfterResult;
+                bestLabel = bestAi.Name;
+            }
+        }
+
+        var report = new Dictionary<string, object?>
+        {
+            ["name"] = optimizationName,
+            ["generatedAt"] = DateTime.Now.ToString("o"),
+            ["timingMetric"] = timingMetric,
+            ["error"] = errorMessage,
+            ["before"] = BuildTimingData(beforeResult, timingMetric),
+            ["bestAfter"] = bestResult != null ? BuildTimingData(bestResult, timingMetric) : null,
+            ["bestStrategy"] = bestResult != null ? bestLabel : null,
+            ["improvement"] = bestResult != null ? new Dictionary<string, object>
+            {
+                ["elapsedPercent"] = beforeElapsedVal > 0 ? Math.Round((1 - bestResult.GetElapsedValue(timingMetric) / beforeElapsedVal) * 100, 2) : 0,
+                ["cpuPercent"] = beforeCpuVal > 0 ? Math.Round((1 - bestResult.GetCpuValue(timingMetric) / beforeCpuVal) * 100, 2) : 0,
+            } : null,
+            ["statistics"] = new Dictionary<string, object>
+            {
+                ["totalAttempts"] = (aiResults?.Count ?? 0) + (afterResult != null ? 1 : 0),
+                ["successfulAttempts"] = (aiResults?.Count(a => a.OptimizeSucceeded && a.AfterResult != null) ?? 0) + (afterResult != null ? 1 : 0),
+                ["aiOptimizations"] = aiResults?.Count ?? 0,
+                ["manualTests"] = afterResult != null ? 1 : 0,
+            },
+            ["manualResult"] = afterResult != null ? BuildTimingData(afterResult, timingMetric) : null,
+            ["aiAttempts"] = aiResults?.Select(ai => new Dictionary<string, object?>
+            {
+                ["name"] = ai.Name,
+                ["description"] = ai.Description,
+                ["optimizeSucceeded"] = ai.OptimizeSucceeded,
+                ["optimizeAttempts"] = ai.OptimizeAttempts,
+                ["revertSucceeded"] = ai.RevertSucceeded,
+                ["revertAttempts"] = ai.RevertAttempts,
+                ["dataIntegrityOk"] = ai.DataIntegrityOk,
+                ["dataIntegrityNotes"] = ai.DataIntegrityNotes,
+                ["error"] = ai.ErrorMessage,
+                ["result"] = ai.AfterResult != null ? BuildTimingData(ai.AfterResult, timingMetric) : null,
+                ["improvement"] = ai.AfterResult != null && ai.OptimizeSucceeded ? new Dictionary<string, object>
+                {
+                    ["elapsedPercent"] = beforeElapsedVal > 0 ? Math.Round((1 - ai.AfterResult.GetElapsedValue(timingMetric) / beforeElapsedVal) * 100, 2) : 0,
+                    ["cpuPercent"] = beforeCpuVal > 0 ? Math.Round((1 - ai.AfterResult.GetCpuValue(timingMetric) / beforeCpuVal) * 100, 2) : 0,
+                } : null,
+                ["folder"] = Path.GetFileName(ai.Folder),
+            }).ToList(),
+        };
+
+        var reportPath = Path.Combine(outputFolder, "results.json");
+        File.WriteAllText(reportPath, JsonSerializer.Serialize(report, JsonOpts));
+        _log($"JSON report written to {reportPath}");
+    }
+
+    private static Dictionary<string, object> BuildTimingData(BenchmarkResult result, string timingMetric)
+    {
+        return new Dictionary<string, object>
+        {
+            ["label"] = result.Label,
+            ["metricCpu"] = Math.Round(result.GetCpuValue(timingMetric), 2),
+            ["metricElapsed"] = Math.Round(result.GetElapsedValue(timingMetric), 2),
+            ["avgCpu"] = Math.Round(result.AvgCpu, 2),
+            ["avgElapsed"] = Math.Round(result.AvgElapsed, 2),
+            ["minCpu"] = result.MinCpu,
+            ["minElapsed"] = result.MinElapsed,
+            ["maxCpu"] = result.MaxCpu,
+            ["maxElapsed"] = result.MaxElapsed,
+            ["medianCpu"] = result.MedianCpu,
+            ["medianElapsed"] = result.MedianElapsed,
+            ["timings"] = result.Timings.Select(t => new Dictionary<string, int>
+            {
+                ["cpuMs"] = t.CpuTimeMs,
+                ["elapsedMs"] = t.ElapsedTimeMs,
+            }).ToList(),
+        };
     }
 
     // ───────────────────────────────────────────────────
@@ -304,7 +538,7 @@ public class ReportGenerator
                 }
 
                 sb.AppendLine($@"  new ApexCharts(document.querySelector('#chartProgress{chartIdx}'), {{
-    chart: {{ type: 'line', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif' }},
+    chart: {{ type: 'line', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif', background: 'transparent', foreColor: '#e2e8f0' }},
     series: [
       {{ name: 'Elapsed Improvement %', data: [{string.Join(",", elapsedSeries)}] }},
       {{ name: 'CPU Improvement %', data: [{string.Join(",", cpuSeries)}] }}
@@ -316,7 +550,7 @@ public class ReportGenerator
     markers: {{ size: 6 }},
     tooltip: {{ y: {{ formatter: function(v) {{ return v !== null ? v.toFixed(1) + '%' : 'N/A'; }} }} }},
     annotations: {{ yaxis: [{{ y: 0, borderColor: '#64748b', strokeDashArray: 4 }}] }},
-    theme: {{ mode: 'light' }}
+    theme: {{ mode: 'dark' }}
   }}).render();");
                 sb.AppendLine("  </script>");
                 sb.AppendLine("</section>");
@@ -340,7 +574,7 @@ public class ReportGenerator
                 }
 
                 sb.AppendLine($@"  new ApexCharts(document.querySelector('#chartCompare{chartIdx}'), {{
-    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif' }},
+    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif', background: 'transparent', foreColor: '#e2e8f0' }},
     series: [
       {{ name: '{metricLabel} Elapsed (ms)', data: [{string.Join(",", barElapsed)}] }},
       {{ name: '{metricLabel} CPU (ms)', data: [{string.Join(",", barCpu)}] }}
@@ -350,7 +584,7 @@ public class ReportGenerator
     colors: ['#6366f1', '#f59e0b'],
     plotOptions: {{ bar: {{ borderRadius: 4, columnWidth: '60%' }} }},
     dataLabels: {{ enabled: true, formatter: function(v) {{ return v + 'ms'; }} }},
-    theme: {{ mode: 'light' }}
+    theme: {{ mode: 'dark' }}
   }}).render();");
                 sb.AppendLine("  </script>");
                 sb.AppendLine("</section>");
@@ -549,33 +783,134 @@ public class ReportGenerator
 
     public void GenerateSummaryReport(string runFolder, List<OptimizationSummary> summaries, string timingMetric, DateTime runStartTime = default)
     {
-        GenerateSummaryMarkdown(runFolder, summaries, timingMetric);
+        GenerateSummaryMarkdown(runFolder, summaries, timingMetric, runStartTime);
+        GenerateSummaryJson(runFolder, summaries, timingMetric, runStartTime);
         GenerateSummaryHtml(runFolder, summaries, timingMetric, runStartTime);
     }
 
-    private void GenerateSummaryMarkdown(string runFolder, List<OptimizationSummary> summaries, string timingMetric)
+    private void GenerateSummaryMarkdown(string runFolder, List<OptimizationSummary> summaries, string timingMetric, DateTime runStartTime)
     {
+        var now = DateTime.Now;
         var sb = new StringBuilder();
-        var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-        sb.AppendLine($"# Benchmark Run Summary — {timestamp}");
-        sb.AppendLine();
         var metricLabel = timingMetric.Equals("Average", StringComparison.OrdinalIgnoreCase) ? "Avg" : "Min";
-        sb.AppendLine($"| Optimization | Status | Before ({metricLabel}) | Best After ({metricLabel}) | Imp. | Best Strategy |");
-        sb.AppendLine("|--------------|--------|--------------|------------------|------|---------------|");
 
-        foreach (var s in summaries)
+        sb.AppendLine($"# SQL Auto-Optimizer — Run Summary");
+        sb.AppendLine();
+        sb.AppendLine($"*Last updated: {now:yyyy-MM-dd HH:mm:ss}*");
+        sb.AppendLine();
+
+        // ── KPI Summary ──
+        var totalRuns = summaries.Count;
+        var runningCount = summaries.Count(s => s.Status == "Running");
+        var doneCount = summaries.Count(s => s.Status == "Done");
+        var failedCount = summaries.Count(s => s.Status is "Failed" or "Cancelled");
+        var pendingCount = summaries.Count(s => s.Status == "Pending");
+        var withResults = summaries.Where(s => s.BeforeElapsed.HasValue && s.BestAfterElapsed.HasValue && s.BeforeElapsed > 0).ToList();
+        var bestImprovement = withResults.Count > 0
+            ? withResults.Max(s => (1 - s.BestAfterElapsed!.Value / s.BeforeElapsed!.Value) * 100) : 0.0;
+        var runDuration = runStartTime != default ? now - runStartTime : TimeSpan.Zero;
+        var isRunning = runningCount > 0 || pendingCount > 0;
+
+        sb.AppendLine("## Dashboard");
+        sb.AppendLine();
+        sb.AppendLine($"- **Total Optimizations:** {totalRuns}");
+        if (isRunning) sb.AppendLine($"- **Running:** {runningCount}");
+        sb.AppendLine($"- **Completed:** {doneCount}");
+        if (failedCount > 0) sb.AppendLine($"- **Failed:** {failedCount}");
+        if (withResults.Count > 0) sb.AppendLine($"- **Best Improvement:** {bestImprovement:F1}%");
+        sb.AppendLine($"- **{(isRunning ? "Elapsed Time" : "Total Duration")}:** {FormatDuration(runDuration)}");
+        sb.AppendLine();
+
+        // Running status
+        if (isRunning)
         {
+            var currentRunning = summaries.FirstOrDefault(s => s.Status == "Running");
+            if (currentRunning != null)
+            {
+                var runElapsed = currentRunning.StartTime.HasValue ? now - currentRunning.StartTime.Value : TimeSpan.Zero;
+                sb.AppendLine($"> **Currently processing:** {currentRunning.FolderName} — running for {FormatDuration(runElapsed)} ({doneCount + 1} of {totalRuns})");
+                sb.AppendLine();
+            }
+        }
+
+        // ── Results Table ──
+        sb.AppendLine("## Results");
+        sb.AppendLine();
+        sb.AppendLine($"| # | Optimization | Status | Type | Before ({metricLabel}) | Best After ({metricLabel}) | Improvement | AI Iters | Duration | Best Strategy |");
+        sb.AppendLine("|---|--------------|--------|------|-------------|------------------|-------------|----------|----------|---------------|");
+
+        for (int i = 0; i < summaries.Count; i++)
+        {
+            var s = summaries[i];
             var before = s.BeforeElapsed.HasValue ? $"{s.BeforeElapsed:F0}ms" : "—";
             var after = s.BestAfterElapsed.HasValue ? $"{s.BestAfterElapsed:F0}ms" : "—";
             var imp = s.BeforeElapsed.HasValue && s.BestAfterElapsed.HasValue && s.BeforeElapsed > 0
                 ? $"{(1 - s.BestAfterElapsed.Value / s.BeforeElapsed.Value) * 100:F1}%"
                 : "—";
+            var type = s.IsManual ? "Manual" : (s.AiIterationCount > 0 || s.Status == "Running" ? "AI" : "—");
+            var aiIters = s.AiIterationCount > 0 ? s.AiIterationCount.ToString() : "—";
+            var duration = s.Duration.HasValue ? FormatDuration(s.Duration.Value)
+                : (s.Status == "Running" && s.StartTime.HasValue ? FormatDuration(now - s.StartTime.Value) + "..." : "—");
 
-            sb.AppendLine($"| {s.FolderName} | {s.Status} | {before} | {after} | {imp} | {s.BestStrategy} |");
+            sb.AppendLine($"| {i + 1} | {s.FolderName} | {s.Status} | {type} | {before} | {after} | {imp} | {aiIters} | {duration} | {s.BestStrategy} |");
         }
+        sb.AppendLine();
 
         var reportPath = Path.Combine(runFolder, "summary.md");
         File.WriteAllText(reportPath, sb.ToString());
+    }
+
+    private void GenerateSummaryJson(string runFolder, List<OptimizationSummary> summaries, string timingMetric, DateTime runStartTime)
+    {
+        var now = DateTime.Now;
+        var withResults = summaries.Where(s => s.BeforeElapsed.HasValue && s.BestAfterElapsed.HasValue && s.BeforeElapsed > 0).ToList();
+        var bestImprovement = withResults.Count > 0
+            ? Math.Round(withResults.Max(s => (1 - s.BestAfterElapsed!.Value / s.BeforeElapsed!.Value) * 100), 2) : 0.0;
+        var runDuration = runStartTime != default ? now - runStartTime : TimeSpan.Zero;
+
+        var report = new Dictionary<string, object?>
+        {
+            ["generatedAt"] = now.ToString("o"),
+            ["runStartedAt"] = runStartTime != default ? runStartTime.ToString("o") : null,
+            ["durationSeconds"] = Math.Round(runDuration.TotalSeconds, 1),
+            ["timingMetric"] = timingMetric,
+            ["dashboard"] = new Dictionary<string, object>
+            {
+                ["totalOptimizations"] = summaries.Count,
+                ["running"] = summaries.Count(s => s.Status == "Running"),
+                ["completed"] = summaries.Count(s => s.Status == "Done"),
+                ["failed"] = summaries.Count(s => s.Status is "Failed" or "Cancelled"),
+                ["pending"] = summaries.Count(s => s.Status == "Pending"),
+                ["bestImprovementPercent"] = bestImprovement,
+            },
+            ["optimizations"] = summaries.Select((s, i) =>
+            {
+                var imp = s.BeforeElapsed.HasValue && s.BestAfterElapsed.HasValue && s.BeforeElapsed > 0
+                    ? Math.Round((1 - s.BestAfterElapsed.Value / s.BeforeElapsed.Value) * 100, 2) : (double?)null;
+
+                return new Dictionary<string, object?>
+                {
+                    ["index"] = i + 1,
+                    ["name"] = s.FolderName,
+                    ["status"] = s.Status,
+                    ["type"] = s.IsManual ? "Manual" : (s.AiIterationCount > 0 ? "AI" : null),
+                    ["beforeElapsedMs"] = s.BeforeElapsed.HasValue ? Math.Round(s.BeforeElapsed.Value, 2) : null,
+                    ["beforeCpuMs"] = s.BeforeCpu.HasValue ? Math.Round(s.BeforeCpu.Value, 2) : null,
+                    ["bestAfterElapsedMs"] = s.BestAfterElapsed.HasValue ? Math.Round(s.BestAfterElapsed.Value, 2) : null,
+                    ["bestAfterCpuMs"] = s.BestAfterCpu.HasValue ? Math.Round(s.BestAfterCpu.Value, 2) : null,
+                    ["improvementPercent"] = imp,
+                    ["bestStrategy"] = s.BestStrategy,
+                    ["aiIterations"] = s.AiIterationCount > 0 ? s.AiIterationCount : null,
+                    ["startTime"] = s.StartTime?.ToString("o"),
+                    ["endTime"] = s.EndTime?.ToString("o"),
+                    ["durationSeconds"] = s.Duration.HasValue ? Math.Round(s.Duration.Value.TotalSeconds, 1) : null,
+                    ["outputFolder"] = !string.IsNullOrEmpty(s.OutputFolderName) ? s.OutputFolderName : null,
+                };
+            }).ToList(),
+        };
+
+        var reportPath = Path.Combine(runFolder, "summary.json");
+        File.WriteAllText(reportPath, JsonSerializer.Serialize(report, JsonOpts));
     }
 
     private void GenerateSummaryHtml(string runFolder, List<OptimizationSummary> summaries, string timingMetric, DateTime runStartTime)
@@ -738,10 +1073,11 @@ public class ReportGenerator
                 duration = FormatDuration(now - s.StartTime.Value) + "...";
 
             var linkHtml = "";
-            if (s.Status is "Done" or "Failed" or "Cancelled")
+            if (s.Status is "Done" or "Failed" or "Cancelled" or "Running")
             {
                 var folderLink = string.IsNullOrEmpty(s.OutputFolderName) ? s.FolderName : s.OutputFolderName;
-                linkHtml = $"<a href=\"{He(folderLink)}/results.html\" class=\"link-btn\">View</a>";
+                var linkLabel = s.Status == "Running" ? "Live" : "View";
+                linkHtml = $"<a href=\"{He(folderLink)}/results.html\" class=\"link-btn{(s.Status == "Running" ? " link-btn-live" : "")}\">{linkLabel}</a>";
             }
 
             sb.AppendLine("    <tr>");
@@ -781,7 +1117,7 @@ public class ReportGenerator
             sb.AppendLine("  <div id=\"chartImprovement\" class=\"chart-box\"></div>");
             sb.AppendLine("  <script>");
             sb.AppendLine($@"  new ApexCharts(document.querySelector('#chartImprovement'), {{
-    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif' }},
+    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif', background: 'transparent', foreColor: '#e2e8f0' }},
     series: [{{ name: 'Improvement %', data: [{improvementData}] }}],
     xaxis: {{ categories: [{chartLabels}], labels: {{ rotate: -45, style: {{ fontSize: '11px' }} }} }},
     yaxis: {{ title: {{ text: 'Improvement (%)' }}, labels: {{ formatter: function(v) {{ return v.toFixed(1) + '%'; }} }} }},
@@ -792,7 +1128,7 @@ public class ReportGenerator
     dataLabels: {{ enabled: true, formatter: function(v) {{ return v.toFixed(1) + '%'; }}, style: {{ fontSize: '13px' }} }},
     legend: {{ show: false }},
     tooltip: {{ y: {{ formatter: function(v) {{ return v.toFixed(1) + '% improvement'; }} }} }},
-    theme: {{ mode: 'light' }}
+    theme: {{ mode: 'dark' }}
   }}).render();");
             sb.AppendLine("  </script>");
             sb.AppendLine("</section>");
@@ -803,7 +1139,7 @@ public class ReportGenerator
             sb.AppendLine("  <div id=\"chartElapsed\" class=\"chart-box\"></div>");
             sb.AppendLine("  <script>");
             sb.AppendLine($@"  new ApexCharts(document.querySelector('#chartElapsed'), {{
-    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif' }},
+    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif', background: 'transparent', foreColor: '#e2e8f0' }},
     series: [
       {{ name: 'Before (ms)', data: [{beforeElapsedData}] }},
       {{ name: 'Best After (ms)', data: [{afterElapsedData}] }}
@@ -813,7 +1149,7 @@ public class ReportGenerator
     colors: ['#ef4444', '#10b981'],
     plotOptions: {{ bar: {{ borderRadius: 4, columnWidth: '60%' }} }},
     dataLabels: {{ enabled: true, formatter: function(v) {{ return v + 'ms'; }}, style: {{ fontSize: '11px' }} }},
-    theme: {{ mode: 'light' }}
+    theme: {{ mode: 'dark' }}
   }}).render();");
             sb.AppendLine("  </script>");
             sb.AppendLine("</section>");
@@ -824,7 +1160,7 @@ public class ReportGenerator
             sb.AppendLine("  <div id=\"chartCpu\" class=\"chart-box\"></div>");
             sb.AppendLine("  <script>");
             sb.AppendLine($@"  new ApexCharts(document.querySelector('#chartCpu'), {{
-    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif' }},
+    chart: {{ type: 'bar', height: 350, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif', background: 'transparent', foreColor: '#e2e8f0' }},
     series: [
       {{ name: 'Before CPU (ms)', data: [{beforeCpuData}] }},
       {{ name: 'Best After CPU (ms)', data: [{afterCpuData}] }}
@@ -834,7 +1170,7 @@ public class ReportGenerator
     colors: ['#8b5cf6', '#06b6d4'],
     plotOptions: {{ bar: {{ borderRadius: 4, columnWidth: '60%' }} }},
     dataLabels: {{ enabled: true, formatter: function(v) {{ return v + 'ms'; }}, style: {{ fontSize: '11px' }} }},
-    theme: {{ mode: 'light' }}
+    theme: {{ mode: 'dark' }}
   }}).render();");
             sb.AppendLine("  </script>");
             sb.AppendLine("</section>");
@@ -904,7 +1240,7 @@ public class ReportGenerator
 
         sb.AppendLine("  <script>");
         sb.AppendLine($@"  new ApexCharts(document.querySelector('#{elId}'), {{
-    chart: {{ type: 'area', height: 300, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif' }},
+    chart: {{ type: 'area', height: 300, toolbar: {{ show: true }}, fontFamily: 'Inter, system-ui, sans-serif', background: 'transparent', foreColor: '#e2e8f0' }},
     series: [
       {{ name: 'CPU Time (ms)', data: [{cpuData}] }},
       {{ name: 'Elapsed Time (ms)', data: [{elapsedData}] }}
@@ -916,7 +1252,7 @@ public class ReportGenerator
     fill: {{ type: 'gradient', gradient: {{ shadeIntensity: 1, opacityFrom: 0.4, opacityTo: 0.05 }} }},
     markers: {{ size: 4 }},
     dataLabels: {{ enabled: false }},
-    theme: {{ mode: 'light' }}
+    theme: {{ mode: 'dark' }}
   }}).render();");
         sb.AppendLine("  </script>");
     }
@@ -937,6 +1273,24 @@ public class ReportGenerator
         sb.AppendLine($"    <tr class=\"row-summary\"><td>Max</td><td>{result.MaxCpu}</td><td>{result.MaxElapsed}</td></tr>");
         sb.AppendLine("    </tbody>");
         sb.AppendLine("  </table>");
+    }
+
+    private static void AppendSqlFileSection(StringBuilder sb, string folder, string fileName, string title)
+    {
+        var content = TryReadFile(Path.Combine(folder, fileName));
+        if (string.IsNullOrWhiteSpace(content)) return;
+
+        sb.AppendLine($"### {title} ({fileName})");
+        sb.AppendLine();
+        sb.AppendLine("<details>");
+        sb.AppendLine($"<summary>Show SQL</summary>");
+        sb.AppendLine();
+        sb.AppendLine("```sql");
+        sb.AppendLine(content);
+        sb.AppendLine("```");
+        sb.AppendLine();
+        sb.AppendLine("</details>");
+        sb.AppendLine();
     }
 
     private static void AppendResultSection(StringBuilder sb, string label, BenchmarkResult result)
@@ -1146,6 +1500,8 @@ public class ReportGenerator
       transition: background 0.15s;
     }
     .link-btn:hover { background: #4f46e5; }
+    .link-btn-live { background: var(--blue); animation: pulse-anim 1.5s ease-in-out infinite; }
+    .link-btn-live:hover { background: #2563eb; }
     .chart-box { min-height: 350px; }
     footer {
       text-align: center;

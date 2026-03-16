@@ -590,6 +590,7 @@ public class BenchmarkRunner
         {
             reportGenerator.GenerateMarkdownReport(outputFolder, optimizationName, beforeResult, afterResult, _config.TimingMetric, aiResults, benchmarkError);
             reportGenerator.GenerateHtmlReport(outputFolder, optimizationName, beforeResult, afterResult, _config.TimingMetric, aiResults, benchmarkError);
+            reportGenerator.GenerateJsonReport(outputFolder, optimizationName, beforeResult, afterResult, _config.TimingMetric, aiResults, benchmarkError);
         }
         catch (Exception ex)
         {
