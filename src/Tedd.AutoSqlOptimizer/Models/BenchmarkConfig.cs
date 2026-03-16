@@ -3,6 +3,7 @@ namespace Tedd.AutoSqlOptimizer.Models;
 public class BenchmarkConfig
 {
     public string ConnectionString { get; set; } = "";
+    public string DatabaseType { get; set; } = "MSSQL";
     public OpenAiConfig OpenAI { get; set; } = new();
     public int BenchmarkIterations { get; set; } = 10;
     public int WarmUpIterations { get; set; } = 2;

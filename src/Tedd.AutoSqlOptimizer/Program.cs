@@ -11,10 +11,10 @@ internal class Program
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-        WriteColored("╔══════════════════════════════════════════╗", ConsoleColor.Cyan);
-        WriteColored("║   MSSQL Optimization Benchmark Tool      ║", ConsoleColor.Cyan);
-        WriteColored("╚══════════════════════════════════════════╝", ConsoleColor.Cyan);
-        Console.WriteLine();
+        ConsoleDisplay.WriteLine("╔══════════════════════════════════════════╗", ConsoleColor.Cyan);
+        ConsoleDisplay.WriteLine("║   MSSQL Optimization Benchmark Tool      ║", ConsoleColor.Cyan);
+        ConsoleDisplay.WriteLine("╚══════════════════════════════════════════╝", ConsoleColor.Cyan);
+        ConsoleDisplay.WriteLine("", ConsoleColor.Gray);
 
         // Load configuration
         var configuration = new ConfigurationBuilder()
@@ -42,47 +42,62 @@ internal class Program
         if (args.Length > 0)
         {
             specificFolder = args[0];
-            WriteColored($"Filtering to optimizations matching: {specificFolder}", ConsoleColor.Yellow);
+            ConsoleDisplay.WriteLine($"Filtering to optimizations matching: {specificFolder}", ConsoleColor.Yellow);
         }
 
-        WriteColored($"Connection: {MaskConnectionString(config.ConnectionString)}", ConsoleColor.DarkGray);
-        WriteColored($"Iterations: {config.BenchmarkIterations} (warm-up: {config.WarmUpIterations})", ConsoleColor.DarkGray);
-        WriteColored($"AI Model: {config.OpenAI.Model}", ConsoleColor.DarkGray);
-        WriteColored($"AI Optimizations: {config.AiOptimizationCount}, Max Retries: {config.AiMaxRetries}", ConsoleColor.DarkGray);
-        Console.WriteLine();
+        ConsoleDisplay.WriteLine($"Connection: {MaskConnectionString(config.ConnectionString)}", ConsoleColor.DarkGray);
+        ConsoleDisplay.WriteLine($"Iterations: {config.BenchmarkIterations} (warm-up: {config.WarmUpIterations})", ConsoleColor.DarkGray);
+        ConsoleDisplay.WriteLine($"AI Model: {config.OpenAI.Model}", ConsoleColor.DarkGray);
+        ConsoleDisplay.WriteLine($"AI Optimizations: {config.AiOptimizationCount}, Max Retries: {config.AiMaxRetries}", ConsoleColor.DarkGray);
+        ConsoleDisplay.WriteLine("", ConsoleColor.Gray);
 
         void Log(string message)
         {
             var color = message switch
             {
-                var m when m.Contains("ERROR", StringComparison.OrdinalIgnoreCase) => ConsoleColor.Red,
-                var m when m.Contains("WARNING", StringComparison.OrdinalIgnoreCase) => ConsoleColor.Yellow,
+                var m when m.Contains("ERROR", StringComparison.OrdinalIgnoreCase)    => ConsoleColor.Red,
+                var m when m.Contains("WARNING", StringComparison.OrdinalIgnoreCase)  => ConsoleColor.Yellow,
                 var m when m.Contains("CRITICAL", StringComparison.OrdinalIgnoreCase) => ConsoleColor.DarkRed,
-                var m when m.Contains("===") => ConsoleColor.Cyan,
-                var m when m.Contains("---") => ConsoleColor.DarkCyan,
+                var m when m.Contains("===")    => ConsoleColor.Cyan,
+                var m when m.Contains("---")    => ConsoleColor.DarkCyan,
                 var m when m.Contains("successfully") => ConsoleColor.Green,
                 _ => ConsoleColor.Gray
             };
-            WriteColored(message, color);
+            ConsoleDisplay.WriteLine(message, color);
         }
 
+        // ── Ctrl+C / SIGTERM handler ──────────────────────────────────────────
+        using var cts = new CancellationTokenSource();
+
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true; // don't terminate immediately — let RunAsync clean up
+            if (!cts.IsCancellationRequested)
+            {
+                ConsoleDisplay.ClearStatus();
+                ConsoleDisplay.WriteLine(
+                    "\n⚠  Cancellation requested — finishing current step and writing reports…",
+                    ConsoleColor.Yellow);
+                cts.Cancel();
+            }
+        };
+
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            if (!cts.IsCancellationRequested)
+                cts.Cancel();
+        };
+
+        // ── Run ───────────────────────────────────────────────────────────────
         var runner = new BenchmarkRunner(config, Log);
-        await runner.RunAsync(specificFolder);
+        await runner.RunAsync(specificFolder, cts.Token);
 
-        WriteColored("\nBenchmark complete!", ConsoleColor.Green);
-    }
-
-    private static void WriteColored(string message, ConsoleColor color)
-    {
-        var prev = Console.ForegroundColor;
-        Console.ForegroundColor = color;
-        Console.WriteLine(message);
-        Console.ForegroundColor = prev;
+        ConsoleDisplay.ClearStatus();
+        ConsoleDisplay.WriteLine("\n✓  Benchmark complete!", ConsoleColor.Green);
     }
 
     private static string MaskConnectionString(string connStr)
     {
-        // Mask password if present
         return System.Text.RegularExpressions.Regex.Replace(
             connStr, @"(Password|Pwd)\s*=\s*[^;]+",
             "$1=***", System.Text.RegularExpressions.RegexOptions.IgnoreCase);

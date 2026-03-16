@@ -1,6 +1,6 @@
-using Tedd.AutoSqlOptimizer.Models;
+using System.Data.Common;
 
-using Microsoft.Data.SqlClient;
+using Tedd.AutoSqlOptimizer.Models;
 
 using OpenAI;
 using OpenAI.Chat;
@@ -14,10 +14,10 @@ namespace Tedd.AutoSqlOptimizer.Services;
 public class AiOptimizer
 {
     private readonly BenchmarkConfig _config;
-    private readonly SqlExecutor _sqlExecutor;
+    private readonly IDatabaseExecutor _sqlExecutor;
     private readonly Action<string> _log;
 
-    public AiOptimizer(BenchmarkConfig config, SqlExecutor sqlExecutor, Action<string> log)
+    public AiOptimizer(BenchmarkConfig config, IDatabaseExecutor sqlExecutor, Action<string> log)
     {
         _config = config;
         _sqlExecutor = sqlExecutor;
@@ -47,7 +47,7 @@ public class AiOptimizer
     );
 
     public async Task<List<AiOptimizationResult>> RunAiOptimizationsAsync(
-        SqlConnection conn,
+        DbConnection conn,
         OptimizationFolder optimization,
         BenchmarkResult beforeResult,
         string outputFolder,
@@ -240,7 +240,7 @@ public class AiOptimizer
     }
 
     private async Task<AiOptimizationResult> ApplyAndTestAsync(
-        SqlConnection conn,
+        DbConnection conn,
         OptimizationFolder optimization,
         string aiFolder,
         string optimizeSql,
@@ -526,7 +526,7 @@ public class AiOptimizer
         }
     }
 
-    private async Task<SchemaDiscoveryResult> GatherSchemaInfoWithAiAsync(SqlConnection conn, string beforeSql, string aiInput, string apiKey)
+    private async Task<SchemaDiscoveryResult> GatherSchemaInfoWithAiAsync(DbConnection conn, string beforeSql, string aiInput, string apiKey)
     {
         var identifiedBaseTables = new List<(string Schema, string Table)>();
         var client = new ChatClient(_config.OpenAI.Model, apiKey);

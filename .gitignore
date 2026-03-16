@@ -423,3 +423,5 @@ FodyWeavers.xsd
 *.msm
 *.msp
 /src/Tedd.AutoSqlOptimizer/Optimizations
+/src/Tedd.AutoSqlOptimizer/Optimize2
+/.claude
